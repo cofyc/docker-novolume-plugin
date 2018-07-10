@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/Sirupsen/logrus"
 	dockerapi "github.com/docker/docker/api"
@@ -56,6 +57,49 @@ func logFieldsFromRequest(req authorization.Request) logrus.Fields {
 	return logrus.Fields{"request": req}
 }
 
+func inSlice(strs []string, str string) bool {
+	for _, s := range strs {
+		if str == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *novolume) areAllVolumesBindMounts(containerID string) error {
+	container, err := p.client.ContainerInspect(containerID)
+	if err != nil {
+		return err
+	}
+	// Check all mounts are bind mounts only.
+	bindDests := []string{}
+	for _, m := range container.Mounts {
+		if m.Driver != "" {
+			return fmt.Errorf("container has non-bind-mount volume at %s, volume driver: %s", m.Destination, m.Driver)
+		}
+		bindDests = append(bindDests, m.Destination)
+	}
+	image, _, err := p.client.ImageInspectWithRaw(container.Image, false)
+	if err != nil {
+		return err
+	}
+	// Check all volumes are bindmounted.
+	notBindMountedVolumes := []string{}
+	for v, _ := range image.Config.Volumes {
+		if !inSlice(bindDests, v) {
+			notBindMountedVolumes = append(notBindMountedVolumes, v)
+		}
+	}
+	if len(notBindMountedVolumes) > 0 {
+		return fmt.Errorf("container has not-bind-mounted volumes: %s", strings.Join(notBindMountedVolumes, ","))
+	}
+	// VolumesFrom are not allowed.
+	if len(container.HostConfig.VolumesFrom) > 0 {
+		return fmt.Errorf("container has VolumesFrom: %s", strings.Join(container.HostConfig.VolumesFrom, ","))
+	}
+	return nil
+}
+
 func (p *novolume) AuthZReq(req authorization.Request) authorization.Response {
 	parsedURL, err := url.ParseRequestURI(req.RequestURI)
 	if err != nil {
@@ -72,48 +116,20 @@ func (p *novolume) AuthZReq(req authorization.Request) authorization.Response {
 				return authorization.Response{Err: err.Error()}
 			}
 			if len(hostConfig.VolumesFrom) > 0 {
-				goto noallow
+				return authorization.Response{Err: fmt.Errorf("hostConfig.VolumesFrom is not allowed: %v", hostConfig.VolumesFrom).Error()}
 			}
 		}
 		res := startRegExp.FindStringSubmatch(parsedURL.Path)
 		if len(res) < 1 {
 			return authorization.Response{Err: "unable to find container name"}
 		}
-		container, err := p.client.ContainerInspect(res[1])
-		if err != nil {
-			return authorization.Response{Err: err.Error()}
-		}
-		bindDests := []string{}
-		for _, m := range container.Mounts {
-			if m.Driver != "" {
-				goto noallow
-			}
-			bindDests = append(bindDests, m.Destination)
-		}
-		image, _, err := p.client.ImageInspectWithRaw(container.Image, false)
-		if err != nil {
-			return authorization.Response{Err: err.Error()}
-		}
-		if len(bindDests) == 0 && len(image.Config.Volumes) > 0 {
-			goto noallow
-		}
-		if len(image.Config.Volumes) > 0 {
-			for _, bd := range bindDests {
-				if _, ok := image.Config.Volumes[bd]; !ok {
-					goto noallow
-				}
-			}
-		}
-		if len(container.HostConfig.VolumesFrom) > 0 {
-			goto noallow
+		if err := p.areAllVolumesBindMounts(res[1]); err != nil {
+			logrus.WithFields(logFieldsFromRequest(req)).Info("request denied")
+			return authorization.Response{Msg: err.Error()}
 		}
 	}
 	logrus.WithFields(logFieldsFromRequest(req)).Info("request allowed")
 	return authorization.Response{Allow: true}
-
-noallow:
-	logrus.WithFields(logFieldsFromRequest(req)).Info("request denied")
-	return authorization.Response{Allow: false, Msg: "volumes are not allowed, only bind mounts are allowed"}
 }
 
 func (p *novolume) AuthZRes(req authorization.Request) authorization.Response {
