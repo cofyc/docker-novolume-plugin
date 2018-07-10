@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"regexp"
 
+	"github.com/Sirupsen/logrus"
 	dockerapi "github.com/docker/docker/api"
 	dockerclient "github.com/docker/engine-api/client"
+	"github.com/docker/engine-api/types/container"
 	"github.com/docker/go-plugins-helpers/authorization"
 )
 
@@ -40,34 +42,40 @@ func newPlugin(dockerHost, certPath string, tlsVerify bool) (*novolume, error) {
 }
 
 var (
-	startRegExp = regexp.MustCompile(`/containers/(.*)/start`)
+	// e.g. /v1.37/containers/189e08209b450e2f866b572f7d1263b12aaa1c8dcbbb5eb473c5e07db0f276d1/start
+	startRegExp = regexp.MustCompile(`^/[^\/]+/containers/(.*)/start$`)
 )
 
 type novolume struct {
 	client *dockerclient.Client
 }
 
+func logFieldsFromRequest(req authorization.Request) logrus.Fields {
+	req.RequestBody = nil
+	req.ResponseBody = nil
+	return logrus.Fields{"request": req}
+}
+
 func (p *novolume) AuthZReq(req authorization.Request) authorization.Response {
-	ruri, err := url.QueryUnescape(req.RequestURI)
+	parsedURL, err := url.ParseRequestURI(req.RequestURI)
 	if err != nil {
 		return authorization.Response{Err: err.Error()}
 	}
-	if req.RequestMethod == "POST" && startRegExp.MatchString(ruri) {
-		// this is deprecated in docker, remove once hostConfig is dropped to
-		// being available at start time
+	if req.RequestMethod == "POST" && startRegExp.MatchString(parsedURL.Path) {
+		// For backward compatiblity, we should disable VolumesFrom here.
+		// Note that, starting from docker version 1.12.0 (api version: 1.24),
+		// passing HostConfig at API container start is not supported.
+		// See https://docs.docker.com/release-notes/docker-engine/#1120-2016-07-28.
 		if req.RequestBody != nil {
-			type vfrom struct {
-				VolumesFrom []string
-			}
-			vf := &vfrom{}
-			if err := json.NewDecoder(bytes.NewReader(req.RequestBody)).Decode(vf); err != nil {
+			hostConfig := &container.HostConfig{}
+			if err := json.NewDecoder(bytes.NewReader(req.RequestBody)).Decode(hostConfig); err != nil {
 				return authorization.Response{Err: err.Error()}
 			}
-			if len(vf.VolumesFrom) > 0 {
+			if len(hostConfig.VolumesFrom) > 0 {
 				goto noallow
 			}
 		}
-		res := startRegExp.FindStringSubmatch(ruri)
+		res := startRegExp.FindStringSubmatch(parsedURL.Path)
 		if len(res) < 1 {
 			return authorization.Response{Err: "unable to find container name"}
 		}
@@ -99,12 +107,13 @@ func (p *novolume) AuthZReq(req authorization.Request) authorization.Response {
 		if len(container.HostConfig.VolumesFrom) > 0 {
 			goto noallow
 		}
-		// TODO(runcom): FROM scratch ?!?!
 	}
+	logrus.WithFields(logFieldsFromRequest(req)).Info("request allowed")
 	return authorization.Response{Allow: true}
 
 noallow:
-	return authorization.Response{Msg: "volumes are not allowed"}
+	logrus.WithFields(logFieldsFromRequest(req)).Info("request denied")
+	return authorization.Response{Allow: false, Msg: "volumes are not allowed, only bind mounts are allowed"}
 }
 
 func (p *novolume) AuthZRes(req authorization.Request) authorization.Response {

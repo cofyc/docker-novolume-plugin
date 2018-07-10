@@ -21,6 +21,8 @@ var (
 func main() {
 	flag.Parse()
 
+	logrus.SetLevel(logrus.DebugLevel)
+
 	novolume, err := newPlugin(*flDockerHost, *flCertPath, *flTLSVerify)
 	if err != nil {
 		logrus.Fatal(err)
