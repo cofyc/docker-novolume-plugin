@@ -1,6 +1,6 @@
 [Unit]
 Description=Docker novolume plugin Socket for the API
-Documentation=man:docker-novolume-plugin(8)
+PartOf=docker-novolume-plugin.service
 
 [Socket]
 ListenStream=/run/docker/plugins/docker-novolume-plugin.sock

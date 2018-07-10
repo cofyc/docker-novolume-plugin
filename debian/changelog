@@ -1,0 +1,5 @@
+docker-novolume-plugin ({{ .Version }}-{{ .Revision }}) {{ .DistroName }} {{ .Arch }}; urgency=optional
+
+  Forked from https://github.com/projectatomic/docker-novolume-plugin.
+
+ -- Yecheng Fu <cofyc.jackson@gmail.com>  {{ date }}

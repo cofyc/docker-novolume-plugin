@@ -1,0 +1,14 @@
+Source: docker-novolume-plugin
+Section: misc
+Priority: optional
+Maintainer: Yecheng Fu <cofyc.jackson@gmail.com>
+Build-Depends: curl, ca-certificates, debhelper (>= 8.0.0), dh-systemd (>= 1.5)
+Standards-Version: 3.9.4
+Homepage: https://github.com/cofyc/docker-novolume-plugin
+Vcs-Git: https://github.com/cofyc/docker-novolume-plugin.git
+Vcs-Browser: https://github.com/cofyc/docker-novolume-plugin
+
+Package: docker-novolume-plugin
+Architecture: {{ .Arch }}
+Depends: ${misc:Depends}
+Description: Docker No Volumes Plugin

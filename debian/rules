@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+#export DH_VERBOSE=1
+
+build:
+	echo noop
+
+binary:
+	mkdir -p usr/libexec/docker
+	curl --fail -sS -L --retry 5 \
+		-o usr/libexec/docker/docker-novolume-plugin \
+		"{{ .BinaryURLBase }}/docker-novolume-plugin"
+	chmod +x usr/libexec/docker/docker-novolume-plugin
+	dh_testroot
+	dh_auto_install
+	dh_shlibdeps
+	dh_install
+	dh_systemd_enable
+	dh_installinit
+	dh_systemd_start
+	dh_installdeb
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+%:
+	dh $@ --with systemd
