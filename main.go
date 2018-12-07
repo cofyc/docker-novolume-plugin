@@ -16,12 +16,13 @@ var (
 	flDockerHost = flag.String("host", defaultDockerHost, "Specifies the host where to contact the docker daemon")
 	flCertPath   = flag.String("cert-path", "", "Certificates path to connect to Docker (cert.pem, key.pem)")
 	flTLSVerify  = flag.Bool("tls-verify", false, "Whether to verify certificates or not")
+	logLevel     = flag.Int("log-level", int(logrus.InfoLevel), "Log level")
 )
 
 func main() {
 	flag.Parse()
 
-	logrus.SetLevel(logrus.DebugLevel)
+	logrus.SetLevel(logrus.Level(*logLevel))
 
 	novolume, err := newPlugin(*flDockerHost, *flCertPath, *flTLSVerify)
 	if err != nil {

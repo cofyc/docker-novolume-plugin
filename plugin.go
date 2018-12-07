@@ -14,6 +14,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	dockerapi "github.com/docker/docker/api"
 	dockerclient "github.com/docker/engine-api/client"
+	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/container"
 	"github.com/docker/go-plugins-helpers/authorization"
 )
@@ -43,7 +44,9 @@ func newPlugin(dockerHost, certPath string, tlsVerify bool) (*novolume, error) {
 }
 
 var (
-	// e.g. /v1.37/containers/189e08209b450e2f866b572f7d1263b12aaa1c8dcbbb5eb473c5e07db0f276d1/start
+	// e.g. POST /v1.37/containers/create
+	createRegExp = regexp.MustCompile(`^/[^\/]+/containers/create$`)
+	// e.g. POST /v1.37/containers/189e08209b450e2f866b572f7d1263b12aaa1c8dcbbb5eb473c5e07db0f276d1/start
 	startRegExp = regexp.MustCompile(`^/[^\/]+/containers/(.*)/start$`)
 )
 
@@ -66,11 +69,23 @@ func inSlice(strs []string, str string) bool {
 	return false
 }
 
-func (p *novolume) areAllVolumesBindMounts(containerID string) error {
-	container, err := p.client.ContainerInspect(containerID)
-	if err != nil {
-		return err
+func (p *novolume) verifyHostConfig(hostConfig *container.HostConfig) error {
+	// VolumesFrom are not allowed.
+	if len(hostConfig.VolumesFrom) > 0 {
+		return fmt.Errorf("hostConfig.VolumesFrom is not allowed: %v", hostConfig.VolumesFrom)
 	}
+	return nil
+}
+
+func (p *novolume) verifyContainerCreateConfig(config *types.ContainerCreateConfig) (err error) {
+	err = p.verifyHostConfig(config.HostConfig)
+	if err != nil {
+		return
+	}
+	return nil
+}
+
+func (p *novolume) verifyContainer(container types.ContainerJSON) error {
 	// Check all mounts are bind mounts only.
 	bindDests := []string{}
 	for _, m := range container.Mounts {
@@ -93,9 +108,9 @@ func (p *novolume) areAllVolumesBindMounts(containerID string) error {
 	if len(notBindMountedVolumes) > 0 {
 		return fmt.Errorf("container has not-bind-mounted volumes: %s", strings.Join(notBindMountedVolumes, ","))
 	}
-	// VolumesFrom are not allowed.
-	if len(container.HostConfig.VolumesFrom) > 0 {
-		return fmt.Errorf("container has VolumesFrom: %s", strings.Join(container.HostConfig.VolumesFrom, ","))
+	// Verify HostConfig.
+	if err := p.verifyHostConfig(container.HostConfig); err != nil {
+		return err
 	}
 	return nil
 }
@@ -105,8 +120,20 @@ func (p *novolume) AuthZReq(req authorization.Request) authorization.Response {
 	if err != nil {
 		return authorization.Response{Err: err.Error()}
 	}
-	if req.RequestMethod == "POST" && startRegExp.MatchString(parsedURL.Path) {
-		// For backward compatiblity, we should disable VolumesFrom here.
+	logrus.WithField("requestURI", req.RequestURI).WithField("requestBody", string(req.RequestBody)).Debug("request")
+	if req.RequestMethod == "POST" && createRegExp.MatchString(parsedURL.Path) {
+		// Create container
+		config := &types.ContainerCreateConfig{}
+		if err := json.NewDecoder(bytes.NewReader(req.RequestBody)).Decode(config); err != nil {
+			return authorization.Response{Err: err.Error()}
+		}
+		if err := p.verifyContainerCreateConfig(config); err != nil {
+			logrus.WithFields(logFieldsFromRequest(req)).Info("request denied")
+			return authorization.Response{Msg: err.Error()}
+		}
+	} else if req.RequestMethod == "POST" && startRegExp.MatchString(parsedURL.Path) {
+		// Start container
+		// Verify HostConfig first
 		// Note that, starting from docker version 1.12.0 (api version: 1.24),
 		// passing HostConfig at API container start is not supported.
 		// See https://docs.docker.com/release-notes/docker-engine/#1120-2016-07-28.
@@ -115,15 +142,20 @@ func (p *novolume) AuthZReq(req authorization.Request) authorization.Response {
 			if err := json.NewDecoder(bytes.NewReader(req.RequestBody)).Decode(hostConfig); err != nil {
 				return authorization.Response{Err: err.Error()}
 			}
-			if len(hostConfig.VolumesFrom) > 0 {
-				return authorization.Response{Err: fmt.Errorf("hostConfig.VolumesFrom is not allowed: %v", hostConfig.VolumesFrom).Error()}
+			if err := p.verifyHostConfig(hostConfig); err != nil {
+				return authorization.Response{Err: err.Error()}
 			}
 		}
+		// Inspect and verify container.
 		res := startRegExp.FindStringSubmatch(parsedURL.Path)
 		if len(res) < 1 {
 			return authorization.Response{Err: "unable to find container name"}
 		}
-		if err := p.areAllVolumesBindMounts(res[1]); err != nil {
+		container, err := p.client.ContainerInspect(res[1])
+		if err != nil {
+			return authorization.Response{Msg: err.Error()}
+		}
+		if err := p.verifyContainer(container); err != nil {
 			logrus.WithFields(logFieldsFromRequest(req)).Info("request denied")
 			return authorization.Response{Msg: err.Error()}
 		}
